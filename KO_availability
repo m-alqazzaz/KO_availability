@@ -1,0 +1,112 @@
+# Load the tidyverse package
+library(tidyverse)
+library(magrittr)
+library(HGNChelper)
+library(annotables)
+library(data.table)
+
+
+
+#Define the base for all the work
+base = "C:/Users/Documents/kocells/"
+
+#Download Crispr knock out data from 
+
+# Read the TSV file Cellosaurus version 49 of May 2024 (data downloaded on May 14, 2024) https://www.cellosaurus.org/search?query=Knockout+cell
+KO_data <- read_tsv("cellosauros_KO.tsv")
+
+##################################################################
+#############Cellosaurous Data Clean up###########################
+##################################################################
+
+# Remove text within parentheses in the 'species' column
+KO_data$species <- gsub("\\s*\\([^)]+\\)", "", KO_data$species)
+
+# Filter for rows where species is "Homo sapiens" and change the name of the column from cell_line to cell_line_RRID
+KO_data <- KO_data %>%
+  filter(species == "Homo sapiens") %>%
+  rename(cell_line_RRID = cell_line) 
+
+# HAP1 Cell lines are propiertory to Horizon. 
+#Add "Horizon" to the left of the cells containing "HAP1" in the KO_status column
+KO_data$KO_status <- ifelse(grepl("HAP1", KO_data$KO_status), paste("Horizon", KO_data$KO_status), KO_data$KO_status)
+
+# Replace "HCT 116" with "HCT116" in the KO_status column--> remove the space
+KO_data$KO_status <- gsub("HCT 116", "HCT116", KO_data$KO_status)
+
+# Filter for Abcam or HAP1 in the KO_status column as they're the YCHarOS partners
+filtered_data <- KO_data %>%
+  filter(grepl("Abcam|Horizon", KO_status))
+
+# Split the KO_status column into separate components
+split_data <- filtered_data %>%
+  separate(KO_status, into = c("company", "cell_line_name", "gene_symbol", "KO"), sep = " ")
+  
+  split_data$cell_line_name <- gsub("-", "", split_data$cell_line_name)
+
+# Group by gene_name and pivot wider ###Optional
+grouped_data <- split_data %>%
+  group_by(gene_symbol) %>%
+  pivot_wider(names_from = company, values_from = c(KO, cell_line_name, cell_line_RRID))
+
+# Change grouped_data to dataframe to allow us to write it in TSV format
+
+grouped_data <- data.frame(lapply(grouped_data, as.character), stringsAsFactors = FALSE)
+
+# save grouped data just for overall number of KO cell lines per target
+write.table(grouped_data, "filtered_list_cellosauros_KO_combined.tsv", sep = "\t", row.names = FALSE)
+
+
+#save filtered data much better represntation
+write.table(split_data, "KOlist_cellosauros_KO_combined.tsv", sep = "\t", row.names = FALSE)
+
+
+####################################################################
+###############Filter Cell lines according to RNA Expression#########
+####################################################################
+
+
+base = "C:/Users/Documents/RNA_expression/"
+
+## load the proteome and RNA quantifications raw values (place in the root folder) DepMap 2Q23 was used for this analysis
+## Data Prep is detailed in the Script GeneDep_RNAexp_DepMap.R https://github.com/m-alqazzaz/DepMap 
+dat = read_tsv(paste0(base,"downloaded_data_depmap2_genedep.tsv"))
+
+
+
+#one output file for all genes
+ASAP_list_rna = data.frame()
+cell_lines_df <- data.frame(lapply(split_data, as.character), stringsAsFactors = FALSE)
+
+
+###########################################################################
+## prepare table to just include the studies with cancer cell lines########
+###########################################################################
+
+
+temp =
+  dat %>%
+  #filter(Study.x %in% studies) %>%
+  dplyr::select(gene_symbol, Stripped_cell_line_name, TPMlogp1, GeneDep, cancer_type_final,Tissue) %>%
+  rename(cell_line_name=Stripped_cell_line_name)%>%
+  filter(TPMlogp1 >= 3.5)
+
+
+# Merge the dataframes based on 'gene_symbol' and 'Stripped_cell_line_name'
+ASAP_list_rna <- inner_join(split_data, temp, by = c("gene_symbol", "cell_line_name"))
+
+grouped_data <- ASAP_list_rna %>%
+  select(-species, -cancer_type_final, -Tissue, -GeneDep, -KO)%>%
+  group_by(gene_symbol) %>%
+  pivot_wider(names_from = company, values_from = c(cell_line_name, cell_line_RRID, TPMlogp1))
+  
+grouped_data <- grouped_data %>%
+  mutate(across(everything(), as.character))
+
+nrow(grouped_data)
+
+grouped_data$cell_line_name_Abcam <- sapply(grouped_data$cell_line_name_Abcam, paste, collapse = ", ")
+
+write.table(ASAP_list_rna, file="C:/Users/Documents/kocells/KO_RNA.tsv",row.names=FALSE, sep="\t")
+
+write.table(grouped_data, file = "C:/Users/Documents/kocells/ASAP_list_grouped.tsv", row.names = FALSE, sep = "\t")
